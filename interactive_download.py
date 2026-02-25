@@ -42,6 +42,34 @@ try:
 except ImportError:
     ASPOSE_AVAILABLE = False
 
+# check for keynote and pages availability
+
+import platform
+IS_MAC = platform.system() == "Darwin"
+KEYNOTE_AVAILABLE = False
+PAGES_AVAILABLE = False
+
+if IS_MAC:
+    import subprocess
+
+    def mac_app_available(app_name: str) -> bool:
+        try:
+            subprocess.run(
+                ["osascript", "-e", f'tell application "{app_name}" to return 1'],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=True
+            )
+            return True
+        except Exception:
+            return False
+
+    KEYNOTE_AVAILABLE = mac_app_available("Keynote")
+    PAGES_AVAILABLE   = mac_app_available("Pages")
+     
+
+
 # Initialize colorama
 colorama_init(autoreset=True)
 
@@ -371,7 +399,7 @@ class OfficeConverter:
             return True
         except Exception:
             return False
-    
+      
     def convert_with_libreoffice(self, input_path: Path, output_path: Path) -> bool:
         """Convert using LibreOffice (cross-platform)"""
         import platform
@@ -443,12 +471,150 @@ class OfficeConverter:
                     except:
                         pass
     
+    def convert_with_keynote(self, input_path: Path, output_path: Path) -> bool:
+        applescript = f'''
+        on run
+            set inputPOSIX to "{input_path.resolve()}"
+            set outputPOSIX to "{output_path.resolve()}"
+
+            -- launch Keynote
+            tell application "Keynote" to activate
+
+            -- wait for Keynote *process*
+            tell application "System Events"
+                set maxTries to 100
+                repeat until (exists process "Keynote") or maxTries = 0
+                    delay 0.2
+                    set maxTries to maxTries - 1
+                end repeat
+                if maxTries = 0 then error "Keynote failed to start"
+            end tell
+
+            delay 0.5
+
+            set inputFile to POSIX file inputPOSIX as alias
+            set outputFile to POSIX file outputPOSIX
+
+            tell application "Keynote"
+                set doc to open inputFile
+                delay 0.3
+                export doc to outputFile as PDF
+                close doc saving no
+            end tell
+        end run
+        '''
+
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".scpt", delete=False) as f:
+                f.write(applescript)
+                script_path = f.name
+
+            subprocess.run(
+                ["osascript", script_path],
+                check=True,
+                timeout=180
+            )
+
+            return output_path.exists() and output_path.stat().st_size > 0
+
+        except subprocess.CalledProcessError:
+            print("Keynote AppleScript failed")
+            return False
+
+        finally:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+
+    def convert_with_pages(self, input_path: Path, output_path: Path) -> bool:
+        applescript = f'''
+        on run
+            set inputPOSIX to "{input_path.resolve()}"
+            set outputPOSIX to "{output_path.resolve()}"
+
+            -- launch Pages
+            tell application "Pages" to activate
+
+            -- wait for Pages *process* (critical)
+            tell application "System Events"
+                set maxTries to 100
+                repeat until (exists process "Pages") or maxTries = 0
+                    delay 0.2
+                    set maxTries to maxTries - 1
+                end repeat
+                if maxTries = 0 then error "Pages failed to start"
+            end tell
+
+            delay 1 -- Pages needs extra settle time
+
+            set inputFile to POSIX file inputPOSIX as alias
+            set outputFile to POSIX file outputPOSIX
+
+            tell application "Pages"
+                set doc to open inputFile
+                delay 0.5
+                export doc to outputFile as PDF
+                close doc saving no
+            end tell
+        end run
+        '''
+
+        try:
+            with tempfile.NamedTemporaryFile("w", suffix=".scpt", delete=False) as f:
+                f.write(applescript)
+                script_path = f.name
+
+            subprocess.run(
+                ["osascript", script_path],
+                check=True,
+                timeout=180
+            )
+
+            return output_path.exists() and output_path.stat().st_size > 0
+
+        except subprocess.CalledProcessError:
+            print("Pages AppleScript failed")
+            return False
+
+        finally:
+            try:
+                os.unlink(script_path)
+            except:
+                pass
+   
+    def quit_mac_apps(self):
+        """Quit macOS Office apps (Keynote, Pages) safely after batch conversion"""
+        import platform
+        if platform.system() != "Darwin":
+            return
+
+        def quit_app(app_name: str):
+            applescript = f'''
+            tell application "{app_name}"
+                if it is running then
+                    quit saving no
+                end if
+            end tell
+            '''
+            try:
+                subprocess.run(
+                    ["osascript", "-e", applescript],
+                    timeout=30,
+                    check=False
+                )
+            except Exception:
+                pass
+
+        quit_app("Keynote")
+        quit_app("Pages")
+
     def convert_pptx_to_pdf(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convert PPTX to PDF with repair and multiple conversion methods"""
         import platform
-        is_linux = platform.system() == "Linux"
+        system = platform.system()
 
-        if is_linux:
+        if system == 'Linux':
             # On Linux: try repair-then-libreoffice first (most reliable)
             repaired_path = None
 
@@ -480,7 +646,21 @@ class OfficeConverter:
             except:
                 pass
             return False, "none"
+        
+        elif system == "Darwin":
+            if KEYNOTE_AVAILABLE:
+                if self.convert_with_keynote(input_path, output_path):
+                    return True, "Keynote"
 
+                repaired_path = self.pptx_repairer.attempt_repair(input_path)
+                if repaired_path:
+                    if self.convert_with_keynote(repaired_path, output_path):
+                        shutil.rmtree(repaired_path.parent, ignore_errors=True)
+                        return True, "Keynote (repaired)"
+                    shutil.rmtree(repaired_path.parent, ignore_errors=True)
+
+            return False, "none"  
+        
         else:
             # Original Windows logic unchanged
             if self.convert_with_powerpoint(input_path, output_path):
@@ -519,6 +699,21 @@ class OfficeConverter:
     
     def convert_docx_to_pdf(self, input_path: Path, output_path: Path) -> Tuple[bool, str]:
         """Convert DOCX to PDF with repair and multiple conversion methods"""
+        import platform
+        system = platform.system()
+        ## mac os pages 
+        if system == "Darwin" and PAGES_AVAILABLE :
+            if self.convert_with_pages(input_path, output_path):
+                return True, "Pages"
+
+            repaired = self.docx_repairer.attempt_repair(input_path)
+            if repaired:
+                if self.convert_with_pages(repaired, output_path):
+                    shutil.rmtree(repaired.parent, ignore_errors=True)
+                    return True, "Pages (repaired)"
+                shutil.rmtree(repaired.parent, ignore_errors=True)
+
+            return False, "none"
         # Try Word COM first (best quality)
         if self.convert_with_word(input_path, output_path):
             if output_path.exists() and output_path.stat().st_size > 0:
@@ -1078,7 +1273,7 @@ def convert_office_to_pdf(input_folder: Path) -> List[Path]:
         DOCX_AVAILABLE = True
     except ImportError:
         DOCX_AVAILABLE = False
-    
+
     # Show available conversion methods based on file types present
     print(f"\nAvailable conversion methods:")
     
@@ -1087,9 +1282,13 @@ def convert_office_to_pdf(input_folder: Path) -> List[Path]:
         print(f"    • PowerPoint COM:  {'✓' if COMTYPES_AVAILABLE else '✗'} (Windows, best quality)")
         print(f"    • python-pptx:     {'✓' if PPTX_AVAILABLE else '✗'} (for repair)")
         print(f"    • Aspose.Slides:   {'✓' if ASPOSE_AVAILABLE else '✗'} (cross-platform)")
+        if IS_MAC:
+            print(f"    • Keynote:         {'✓' if KEYNOTE_AVAILABLE else '✗'} (macOS)")
         print(f"  DOCX files:")
         print(f"    • Word COM:        {'✓' if COMTYPES_AVAILABLE else '✗'} (Windows, best quality)")
         print(f"    • python-docx:     {'✓' if DOCX_AVAILABLE else '✗'} (for repair)")
+        if IS_MAC:
+            print(f"    • Pages:           {'✓' if PAGES_AVAILABLE else '✗'} (macOS)")
         print(f"  Both:")
         print(f"    • LibreOffice:     checking...")
     elif has_pptx:
@@ -1182,7 +1381,8 @@ def convert_office_to_pdf(input_folder: Path) -> List[Path]:
             print(f"  ... and {len(failed_files) - 10} more")
     
     print(f"{Fore.GREEN}{'='*70}{Style.RESET_ALL}")
-    
+    if IS_MAC:
+        converter.quit_mac_apps()
     return converted_files
 
 
@@ -1731,4 +1931,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+ 
