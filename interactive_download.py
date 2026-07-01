@@ -1396,7 +1396,7 @@ def display_courses(courses: List[Dict], page_size: int = 10, fetch_fn=None) -> 
                 pass
 
             # ── search bar ────────────────────────────────────────────────
-            prompt = " 🔍 "
+            prompt = " Title: "
             search_label = (prompt + query)[:inner_w]
             try:
                 stdscr.addstr(box_y + 3, box_x + 1, search_label.ljust(inner_w))
@@ -1603,123 +1603,132 @@ def main():
     try:
         downloader.login()
 
-        # Get courses
-        courses = downloader.get_courses()
+        # Get raw (unfiltered) course list once; reused for every course downloaded this session
+        all_courses = downloader.get_courses()
 
-        # Filter by academic year
-        courses = downloader.filter_courses_by_year(courses)
+        while True:
+            # Filter by academic year
+            courses = downloader.filter_courses_by_year(all_courses)
 
-        if not courses:
-            print(f"\n{Fore.RED}No courses found for selected year. Exiting.{Style.RESET_ALL}")
-            return
+            if not courses:
+                print(f"\n{Fore.RED}No courses found for selected year. Exiting.{Style.RESET_ALL}")
+                break
 
-        # Display and select course
-        print(f"\n{Fore.CYAN}[3/7] Selecting course...{Style.RESET_ALL}")
-        selected_course = display_courses(courses, fetch_fn=downloader._fetch_and_cache_courses)
+            # Display and select course
+            print(f"\n{Fore.CYAN}[3/7] Selecting course...{Style.RESET_ALL}")
+            selected_course = display_courses(courses, fetch_fn=downloader._fetch_and_cache_courses)
 
-        if not selected_course:
-            print(f"\n{Fore.YELLOW}No course selected. Exiting.{Style.RESET_ALL}")
-            return
+            if not selected_course:
+                print(f"\n{Fore.YELLOW}No course selected. Exiting.{Style.RESET_ALL}")
+                break
 
-        print(
-            f"\n{Fore.GREEN}✓ Selected: {selected_course['subjectCode']} - {selected_course['subjectName']}{Style.RESET_ALL}"
-        )
-
-        course_id = selected_course["id"]
-        course_code = selected_course["subjectCode"]
-        course_name = selected_course["subjectName"]
-
-        # Get units
-        all_units = downloader.get_units(course_id)
-        print(f"\n{Fore.CYAN}Available Units:{Style.RESET_ALL}")
-        for idx, unit in enumerate(all_units, 1):
-            print(f"  {idx}. {unit['name']}")
-
-        # Select units
-        print(
-            f"\n{Fore.CYAN}Enter unit numbers (e.g., 1,2,3 for units 1,2,3 or 'all'): {Style.RESET_ALL}",
-            end="",
-        )
-        unit_input = input().strip().lower()
-
-        if unit_input == "all":
-            selected_units = list(range(1, len(all_units) + 1))
-        else:
-            selected_units = [int(x.strip()) for x in unit_input.split(",")]
-
-        print(f"{Fore.GREEN}✓ Selected units: {', '.join(map(str, selected_units))}{Style.RESET_ALL}")
-
-        # Select resource types
-        print(f"\n{Fore.CYAN}Available Resource Types:{Style.RESET_ALL}")
-        for res_id, res_name in RESOURCE_TYPES.items():
-            print(f"  {res_id}. {res_name}")
-
-        print(
-            f"\n{Fore.CYAN}Enter resource type numbers (e.g., 2,3,6 for Slides, Notes, QB or 'all'): {Style.RESET_ALL}",
-            end="",
-        )
-        resource_input = input().strip().lower()
-
-        if resource_input == "all":
-            selected_resources = list(RESOURCE_TYPES.keys())
-        else:
-            selected_resources = [x.strip() for x in resource_input.split(",")]
-
-        resource_names = [RESOURCE_TYPES[r] for r in selected_resources]
-        print(f"{Fore.GREEN}✓ Selected resources: {', '.join(resource_names)}{Style.RESET_ALL}")
-
-        # Create base directory with subject name
-        # Sanitize course name for folder name
-        safe_course_name = "".join(
-            c if c.isalnum() or c in (" ", "-", "_") else "_"
-            for c in course_name
-        ).strip()[:60]
-        safe_course_name = "_".join(safe_course_name.split())
-        
-        base_dir = Path("downloads") / f"{safe_course_name}"
-        base_dir.mkdir(parents=True, exist_ok=True)
-
-        # Download resources
-        downloader.download_resources(
-            course_id, course_name, selected_units, selected_resources, base_dir
-        )
-
-        # Check for non-PDF files and ask for conversion
-        office_files = []
-        for ext in ["*.docx", "*.pptx", "*.doc", "*.ppt"]:
-            office_files.extend(base_dir.rglob(ext))
-
-        if office_files:
             print(
-                f"\n{Fore.YELLOW}Found {len(office_files)} non-PDF files (Word/PowerPoint){Style.RESET_ALL}"
+                f"\n{Fore.GREEN}✓ Selected: {selected_course['subjectCode']} - {selected_course['subjectName']}{Style.RESET_ALL}"
             )
+
+            course_id = selected_course["id"]
+            course_code = selected_course["subjectCode"]
+            course_name = selected_course["subjectName"]
+
+            # Get units
+            all_units = downloader.get_units(course_id)
+            print(f"\n{Fore.CYAN}Available Units:{Style.RESET_ALL}")
+            for idx, unit in enumerate(all_units, 1):
+                print(f"  {idx}. {unit['name']}")
+
+            # Select units
             print(
-                f"{Fore.CYAN}Do you want to convert them to PDF? (y/n): {Style.RESET_ALL}",
+                f"\n{Fore.CYAN}Enter unit numbers (e.g., 1,2,3 for units 1,2,3 or 'all'): {Style.RESET_ALL}",
                 end="",
             )
-            convert_choice = input().strip().lower()
+            unit_input = input().strip().lower()
 
-            if convert_choice == "y":
-                convert_office_to_pdf(base_dir)
+            if unit_input == "all":
+                selected_units = list(range(1, len(all_units) + 1))
+            else:
+                selected_units = [int(x.strip()) for x in unit_input.split(",")]
 
-        # Detect and remove duplicate PDFs
-        deduplicate_pdfs_in_folder(base_dir, selected_resources)
+            print(f"{Fore.GREEN}✓ Selected units: {', '.join(map(str, selected_units))}{Style.RESET_ALL}")
 
-        # Ask for PDF merging
-        print(f"\n{Fore.CYAN}Do you want to merge PDFs by resource type? (y/n): {Style.RESET_ALL}", end="")
-        merge_choice = input().strip().lower()
+            # Select resource types
+            print(f"\n{Fore.CYAN}Available Resource Types:{Style.RESET_ALL}")
+            for res_id, res_name in RESOURCE_TYPES.items():
+                print(f"  {res_id}. {res_name}")
 
-        if merge_choice == "y":
-            merge_pdfs_by_type(base_dir, selected_resources)
+            print(
+                f"\n{Fore.CYAN}Enter resource type numbers (e.g., 2,3,6 for Slides, Notes, QB or 'all'): {Style.RESET_ALL}",
+                end="",
+            )
+            resource_input = input().strip().lower()
 
-        # Automatically cleanup unwanted files
-        cleanup_unwanted_files(base_dir)
+            if resource_input == "all":
+                selected_resources = list(RESOURCE_TYPES.keys())
+            else:
+                selected_resources = [x.strip() for x in resource_input.split(",")]
 
-        # Final summary
-        print(f"\n{Fore.GREEN}{Style.BRIGHT}{'='*80}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}{Style.BRIGHT}✓ All tasks completed!{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}Location: {base_dir.absolute()}{Style.RESET_ALL}")
-        print(f"{Fore.GREEN}{Style.BRIGHT}{'='*80}{Style.RESET_ALL}\n")
+            resource_names = [RESOURCE_TYPES[r] for r in selected_resources]
+            print(f"{Fore.GREEN}✓ Selected resources: {', '.join(resource_names)}{Style.RESET_ALL}")
+
+            # Create base directory with subject name
+            # Sanitize course name for folder name
+            safe_course_name = "".join(
+                c if c.isalnum() or c in (" ", "-", "_") else "_"
+                for c in course_name
+            ).strip()[:60]
+            safe_course_name = "_".join(safe_course_name.split())
+
+            base_dir = Path("downloads") / f"{safe_course_name}"
+            base_dir.mkdir(parents=True, exist_ok=True)
+
+            # Download resources
+            downloader.download_resources(
+                course_id, course_name, selected_units, selected_resources, base_dir
+            )
+
+            # Check for non-PDF files and ask for conversion
+            office_files = []
+            for ext in ["*.docx", "*.pptx", "*.doc", "*.ppt"]:
+                office_files.extend(base_dir.rglob(ext))
+
+            if office_files:
+                print(
+                    f"\n{Fore.YELLOW}Found {len(office_files)} non-PDF files (Word/PowerPoint){Style.RESET_ALL}"
+                )
+                print(
+                    f"{Fore.CYAN}Do you want to convert them to PDF? (y/n): {Style.RESET_ALL}",
+                    end="",
+                )
+                convert_choice = input().strip().lower()
+
+                if convert_choice == "y":
+                    convert_office_to_pdf(base_dir)
+
+            # Detect and remove duplicate PDFs
+            deduplicate_pdfs_in_folder(base_dir, selected_resources)
+
+            # Ask for PDF merging
+            print(f"\n{Fore.CYAN}Do you want to merge PDFs by resource type? (y/n): {Style.RESET_ALL}", end="")
+            merge_choice = input().strip().lower()
+
+            if merge_choice == "y":
+                merge_pdfs_by_type(base_dir, selected_resources)
+
+            # Automatically cleanup unwanted files
+            cleanup_unwanted_files(base_dir)
+
+            # Final summary
+            print(f"\n{Fore.GREEN}{Style.BRIGHT}{'='*80}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}{Style.BRIGHT}✓ All tasks completed!{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}Location: {base_dir.absolute()}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}{Style.BRIGHT}{'='*80}{Style.RESET_ALL}\n")
+
+            # Ask if the user wants to download another course
+            print(f"{Fore.CYAN}Download another course? (y/n): {Style.RESET_ALL}", end="")
+            another_choice = input().strip().lower()
+            if another_choice != "y":
+                break
+
+            os.system("cls" if os.name == "nt" else "clear")
 
     except Exception as e:
         print(f"\n{Fore.RED}Error: {e}{Style.RESET_ALL}")
