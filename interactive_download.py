@@ -1728,6 +1728,8 @@ def main():
             if another_choice != "y":
                 break
 
+            os.system("cls" if os.name == "nt" else "clear")
+
     except Exception as e:
         print(f"\n{Fore.RED}Error: {e}{Style.RESET_ALL}")
         sys.exit(1)
