@@ -53,11 +53,12 @@ CACHE_FILE = Path("courses.json")
 RESOURCE_TYPES = {
     "2": "Slides",
     "3": "Notes",
-    "4": "QA",
+    "4": "Forums",
     "5": "Assignments",
     "6": "QB",
-    "7": "MCQs",
-    "8": "References",
+    "7": "QA",
+    "8": "MCQs",
+    "9": "References",
 }
 
 
@@ -563,6 +564,7 @@ class PESUInteractiveDownloader:
         self.password = password
         self.base_url = "https://www.pesuacademy.com/Academy"
         self.downloaded_files = []
+        self.csrf_token = None
 
     def logout(self):
         """Logout from PESU Academy and cleanup session"""
@@ -681,11 +683,40 @@ class PESUInteractiveDownloader:
         if "authfailed" in response.url:
             raise Exception("Login failed! Check credentials.")
 
+        self.csrf_token = csrf_token
+        try:
+            profile = self.session.get(f"{self.base_url}/s/studentProfilePESU")
+            profile_soup = BeautifulSoup(profile.text, "html.parser")
+            meta_csrf = profile_soup.find("meta", {"name": "csrf-token"})
+            if meta_csrf and meta_csrf.get("content"):
+                self.csrf_token = meta_csrf.get("content")
+        except Exception:
+            pass
+
         print(f"{Fore.GREEN}✓ Login successful{Style.RESET_ALL}")
 
+    def _ajax_headers(self) -> Dict[str, str]:
+        """Headers used by PESU Academy's student-side AJAX calls."""
+        headers = {"Referer": f"{self.base_url}/s/studentProfilePESU"}
+        if self.csrf_token:
+            headers["X-CSRF-Token"] = self.csrf_token
+        return headers
+
+    def _clean_id(self, value) -> str:
+        """Clean PESU's escaped option values."""
+        return str(value).strip().replace('\\"', "").replace("\\'", "").strip('"').strip("'").replace("\\", "")
+
     def get_courses(self) -> List[Dict]:
-        """Get all available courses (cache-first approach)"""
+        """Get courses visible to the logged-in student, falling back to cache."""
         print(f"\n{Fore.CYAN}[2/7] Fetching available courses...{Style.RESET_ALL}")
+
+        try:
+            courses = self._fetch_student_courses()
+            if courses:
+                print(f"{Fore.GREEN}✓ Loaded {len(courses)} enrolled courses from PESU Academy{Style.RESET_ALL}")
+                return courses
+        except Exception as e:
+            print(f"{Fore.YELLOW}  Could not fetch enrolled courses: {e}{Style.RESET_ALL}")
 
         # ── always try cache first ────────────────────────────────────
         if CACHE_FILE.exists():
@@ -705,6 +736,62 @@ class PESUInteractiveDownloader:
         # ── no cache at all → must fetch ─────────────────────────────
         print(f"{Fore.YELLOW}  No cache found — fetching from server (first run, one-time wait)...{Style.RESET_ALL}")
         return self._fetch_and_cache_courses()
+
+    def _fetch_student_courses(self) -> List[Dict]:
+        """Fetch courses shown under the student's My Courses page."""
+        semester_response = self.session.get(
+            f"{self.base_url}/s/studentProfile/getStudentSemestersPESU",
+            headers=self._ajax_headers(),
+        )
+        if semester_response.status_code != 200:
+            raise Exception(f"semester request failed ({semester_response.status_code})")
+
+        semester_soup = BeautifulSoup(semester_response.text, "html.parser")
+        semesters = [
+            (self._clean_id(option.get("value")), option.text.strip())
+            for option in semester_soup.find_all("option")
+            if option.get("value")
+        ]
+
+        courses = []
+        seen_ids = set()
+        for semester_id, semester_name in semesters:
+            response = self.session.post(
+                f"{self.base_url}/s/studentProfilePESUAdmin",
+                headers=self._ajax_headers(),
+                data={
+                    "controllerMode": "6403",
+                    "actionType": "38",
+                    "id": semester_id,
+                    "menuId": "5",
+                },
+            )
+            if response.status_code != 200:
+                continue
+
+            soup = BeautifulSoup(response.text, "html.parser")
+            for row in soup.find_all("tr", id=re.compile(r"^(sub)?rowWiseCourseContent_")):
+                match = re.search(r"clickOnCourseContent\('([^']+)'", row.get("onclick", ""))
+                course_id = match.group(1) if match else row.get("id", "").split("_")[-1]
+                cells = [cell.get_text(" ", strip=True) for cell in row.find_all("td")]
+                if not course_id or len(cells) < 2 or course_id in seen_ids:
+                    continue
+
+                subject_code = cells[0].split()[0].strip()
+                subject_title = cells[1].strip()
+                if not subject_code or not subject_title:
+                    continue
+
+                seen_ids.add(course_id)
+                courses.append({
+                    "id": course_id,
+                    "subjectCode": subject_code,
+                    "subjectName": f"{subject_code}-{subject_title}",
+                    "semesterId": semester_id,
+                    "semesterName": semester_name,
+                })
+
+        return courses
 
     def _cache_age_str(self, saved_at: float) -> str:
         """Get human-readable cache age"""
@@ -743,119 +830,162 @@ class PESUInteractiveDownloader:
 
         return courses
 
-    def filter_courses_by_year(self, courses: List[Dict]) -> List[Dict]:
-        """Filter and sort courses by academic year"""
-        print(f"\n{Fore.CYAN}Select Academic Year:{Style.RESET_ALL}")
-        print("  1. UE25")
-        print("  2. UE24")
-        print("  3. UE23")
-        print("  4. UE22")
-        print("  5. UE21")
-        print("  6. UE20")
-        print("  7. All years")
-        
-        choice = input(f"\n{Fore.CYAN}Enter choice (1-7, default=3): {Style.RESET_ALL}").strip() or "3"
-        
-        filter_map = {
-            "1": ["UE25"],
-            "2": ["UE24"],
-            "3": ["UE23"],
-            "4": ["UE22"],
-            "5": ["UE21"],
-            "6": ["UE20"],
-            "7": ["UE25", "UE24", "UE23", "UE22", "UE21", "UE20"],
-        }
-        
-        prefixes = filter_map.get(choice, ["UE23"])
-        
-        # Filter courses
-        filtered = [
-            c for c in courses
-            if any(c["subjectCode"].startswith(prefix) for prefix in prefixes)
-        ]
-        
-        # Sort by year (newest first) then alphabetically
-        def get_year_priority(course):
-            code = course["subjectCode"]
-            for i, prefix in enumerate(["UE25", "UE24", "UE23", "UE22", "UE21", "UE20"]):
-                if code.startswith(prefix):
-                    return i
-            return 99
+    def filter_courses_by_semester(self, courses: List[Dict]) -> List[Dict]:
+        """Filter enrolled courses by the semesters visible to the student."""
+        semesters = []
+        seen = set()
+        for course in courses:
+            semester_id = course.get("semesterId")
+            semester_name = course.get("semesterName")
+            if not semester_id or not semester_name or semester_id in seen:
+                continue
+            seen.add(semester_id)
+            semesters.append((semester_id, semester_name))
 
-        filtered.sort(key=lambda c: (get_year_priority(c), c["subjectCode"]))
+        if not semesters:
+            filtered = sorted(courses, key=lambda c: c.get("subjectCode", ""))
+            print(f"{Fore.YELLOW}No semester metadata found; showing all courses.{Style.RESET_ALL}")
+            return filtered
 
-        year_names = {
-            "1": "2025-26",
-            "2": "2024-25",
-            "3": "2023-24",
-            "4": "2022-23",
-            "5": "2021-22",
-            "6": "2020-21",
-            "7": "recent years"
-        }
-        
-        print(f"{Fore.GREEN}✓ Filtered to {len(filtered)} courses for {year_names.get(choice, 'selected years')}{Style.RESET_ALL}")
+        print(f"\n{Fore.CYAN}Select Semester:{Style.RESET_ALL}")
+        for idx, (_semester_id, semester_name) in enumerate(semesters, 1):
+            count = sum(1 for course in courses if course.get("semesterName") == semester_name)
+            print(f"  {idx}. {semester_name} ({count} courses)")
+        all_choice = len(semesters) + 1
+        print(f"  {all_choice}. All semesters ({len(courses)} courses)")
+
+        default_choice = "1"
+        choice = input(
+            f"\n{Fore.CYAN}Enter choice (1-{all_choice}, default={default_choice}): {Style.RESET_ALL}"
+        ).strip() or default_choice
+
+        if choice == str(all_choice):
+            filtered = courses[:]
+            selected_name = "all semesters"
+        else:
+            try:
+                selected_id, selected_name = semesters[int(choice) - 1]
+            except (ValueError, IndexError):
+                selected_id, selected_name = semesters[0]
+                print(f"{Fore.YELLOW}Invalid choice; using {selected_name}.{Style.RESET_ALL}")
+
+            filtered = [
+                course for course in courses
+                if course.get("semesterId") == selected_id
+            ]
+
+        filtered.sort(key=lambda c: c.get("subjectCode", ""))
+        print(f"{Fore.GREEN}✓ Filtered to {len(filtered)} courses for {selected_name}{Style.RESET_ALL}")
         return filtered
 
     def get_units(self, course_id: str) -> List[Dict]:
-        """Get all units for a course"""
-        url = f"{self.base_url}/a/i/getCourse/{course_id}"
-        response = self.session.get(url)
+        """Get all units for a course using the student-side course content page."""
+        url = f"{self.base_url}/s/studentProfilePESUAdmin"
+        response = self.session.get(
+            url,
+            headers=self._ajax_headers(),
+            params={
+                "controllerMode": "6403",
+                "actionType": "42",
+                "id": course_id,
+                "menuId": "5",
+            },
+        )
+        if response.status_code != 200:
+            print(f"{Fore.YELLOW}⚠ Could not fetch units ({response.status_code}){Style.RESET_ALL}")
+            return []
+
         soup = BeautifulSoup(response.text, "html.parser")
-        options = soup.find_all("option")
+        subtype_input = soup.find("input", {"id": "subType"})
+        subtype = subtype_input.get("value", "3") if subtype_input else "3"
 
         units = []
-        for option in options:
-            unit_id = option.get("value")
-            unit_name = option.text.strip()
-            if unit_id and unit_name:
-                unit_id = (
-                    str(unit_id).strip().replace("\\", "").strip('"').strip("'")
-                )
-                units.append({"id": unit_id, "name": unit_name})
+        for element in soup.find_all(onclick=True):
+            onclick = element.get("onclick", "")
+            match = re.search(r"handleclassUnit\('([^']+)'\)", onclick)
+            if not match:
+                continue
+
+            unit_id = self._clean_id(match.group(1))
+            unit_name = element.get("title") or element.get_text(" ", strip=True)
+            if unit_id and unit_name and not any(unit["id"] == unit_id for unit in units):
+                units.append({"id": unit_id, "name": unit_name, "subType": subtype, "course_id": course_id})
 
         return units
 
-    def get_classes(self, unit_id: str) -> List[Dict]:
-        """Get all classes for a unit"""
-        url = f"{self.base_url}/a/i/getCourseClasses/{unit_id}"
-        response = self.session.get(url)
-
-        html_content = (
-            response.json()
-            if response.headers.get("Content-Type", "").startswith("application/json")
-            else response.text
+    def get_classes(self, course_id: str, unit: Dict) -> List[Dict]:
+        """Get all classes for a unit using the student-side unit table."""
+        url = f"{self.base_url}/s/studentProfilePESUAdmin"
+        response = self.session.get(
+            url,
+            headers=self._ajax_headers(),
+            params={
+                "controllerMode": "6403",
+                "actionType": "43",
+                "coursecontentid": unit["id"],
+                "selectedData": course_id,
+                "subType": unit.get("subType", "3"),
+                "menuId": "5",
+            },
         )
-        soup = BeautifulSoup(html_content, "html.parser")
-        options = soup.find_all("option")
+        if response.status_code != 200:
+            print(f"{Fore.YELLOW}⚠ Could not fetch classes for {unit['name']} ({response.status_code}){Style.RESET_ALL}")
+            return []
 
+        soup = BeautifulSoup(response.text, "html.parser")
         classes = []
-        for option in options:
-            class_id = option.get("value")
-            class_name = option.text.strip()
-            if class_id and class_name:
-                class_id = (
-                    str(class_id).strip().replace("\\", "").strip('"').strip("'")
-                )
-                classes.append({"id": class_id, "name": class_name})
+        seen = set()
+        for row in soup.find_all("tr", onclick=True):
+            onclick = row.get("onclick", "")
+            match = re.search(
+                r"handleclasscoursecontentunit\('([^']+)','([^']+)','([^']+)','([^']+)',\s*([^,\)]+)",
+                onclick,
+            )
+            if not match:
+                continue
+
+            class_id, subject_id, coursecontent_id, class_no, _content_type = match.groups()
+            key = (class_id, class_no)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            title = row.find(class_="short-title")
+            class_name = (
+                title.get("title")
+                if title and title.get("title")
+                else row.find("td").get_text(" ", strip=True) if row.find("td") else f"Class {class_no}"
+            )
+            classes.append({
+                "id": self._clean_id(class_id),
+                "name": class_name.strip() or f"Class {class_no}",
+                "coursecontentid": self._clean_id(coursecontent_id),
+                "classno": self._clean_id(class_no),
+                "subjectid": self._clean_id(subject_id),
+                "subType": unit.get("subType", "3"),
+            })
 
         return classes
 
     def get_resource_links(
-        self, course_id: str, class_id: str, resource_type_id: str
+        self, course_id: str, cls: Dict, resource_type_id: str
     ) -> List[Dict]:
         """Get download links for a specific resource type"""
         url = f"{self.base_url}/s/studentProfilePESUAdmin"
         params = {
-            "url": "studentProfilePESUAdmin",
             "controllerMode": "6403",
             "actionType": "60",
             "selectedData": course_id,
             "id": resource_type_id,
-            "unitid": class_id,
+            "unitid": cls["id"],
+            "coursecontentid": cls.get("coursecontentid"),
+            "classno": cls.get("classno"),
+            "subType": cls.get("subType", "3"),
+            "menuId": "5",
         }
+        params = {key: value for key, value in params.items() if value is not None}
 
-        response = self.session.get(url, params=params)
+        response = self.session.get(url, headers=self._ajax_headers(), params=params)
 
         # Check if direct file download
         content_type = response.headers.get("Content-Type", "")
@@ -873,8 +1003,20 @@ class PESUInteractiveDownloader:
             onclick = element.get("onclick", "")
             text = element.text.strip()
 
+            # Pattern 0: student announcement/document download
+            if "downloadcoursedocforstudent" in onclick:
+                match = re.search(r"downloadcoursedocforstudent\('([^']+)'", onclick)
+                if match:
+                    doc_id = match.group(1)
+                    full_url = (
+                        f"{self.base_url}/s/referenceMeterials/downloadcoursedoc/{doc_id}"
+                    )
+                    download_links.append(
+                        {"type": "link", "url": full_url, "text": text}
+                    )
+
             # Pattern 1: downloadslidecoursedoc in loadIframe
-            if "downloadslidecoursedoc" in onclick:
+            elif "downloadslidecoursedoc" in onclick:
                 match = re.search(r"loadIframe\('([^']+)'", onclick)
                 if match:
                     download_url = match.group(1).split("#")[0]
@@ -936,7 +1078,7 @@ class PESUInteractiveDownloader:
             print(f"{Fore.BLUE}Unit {unit_idx}: {unit['name']}{Style.RESET_ALL}")
             print(f"{Fore.BLUE}{'='*70}{Style.RESET_ALL}")
 
-            classes = self.get_classes(unit["id"])
+            classes = self.get_classes(course_id, unit)
             print(f"Found {len(classes)} classes")
 
             # Create unit directory
@@ -960,7 +1102,7 @@ class PESUInteractiveDownloader:
                 # Try selected resource types
                 for resource_id in selected_resources:
                     resource_name = RESOURCE_TYPES[resource_id]
-                    links = self.get_resource_links(course_id, cls["id"], resource_id)
+                    links = self.get_resource_links(course_id, cls, resource_id)
 
                     if links:
                         print(f"  {resource_name}: {len(links)} file(s)")
@@ -1607,16 +1749,16 @@ def main():
         all_courses = downloader.get_courses()
 
         while True:
-            # Filter by academic year
-            courses = downloader.filter_courses_by_year(all_courses)
+            # Filter by semester
+            courses = downloader.filter_courses_by_semester(all_courses)
 
             if not courses:
-                print(f"\n{Fore.RED}No courses found for selected year. Exiting.{Style.RESET_ALL}")
+                print(f"\n{Fore.RED}No courses found for selected semester. Exiting.{Style.RESET_ALL}")
                 break
 
             # Display and select course
             print(f"\n{Fore.CYAN}[3/7] Selecting course...{Style.RESET_ALL}")
-            selected_course = display_courses(courses, fetch_fn=downloader._fetch_and_cache_courses)
+            selected_course = display_courses(courses, fetch_fn=downloader._fetch_student_courses)
 
             if not selected_course:
                 print(f"\n{Fore.YELLOW}No course selected. Exiting.{Style.RESET_ALL}")
