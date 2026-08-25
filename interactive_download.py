@@ -1713,6 +1713,51 @@ def display_courses(courses: List[Dict], page_size: int = 10, fetch_fn=None) -> 
     return result[0]
 
 
+def prompt_unit_selection(all_units: List[Dict]) -> List[int]:
+    """Prompt for unit numbers, reprompting until the input is valid."""
+    while True:
+        print(
+            f"\n{Fore.CYAN}Enter unit numbers (e.g., 1,2,3 for units 1,2,3 or 'all'): {Style.RESET_ALL}",
+            end="",
+        )
+        unit_input = input().strip().lower()
+
+        if unit_input == "all":
+            return list(range(1, len(all_units) + 1))
+
+        try:
+            selected = [int(x.strip()) for x in unit_input.split(",") if x.strip()]
+        except ValueError:
+            print(f"{Fore.RED}Invalid input — enter numbers separated by commas, or 'all'.{Style.RESET_ALL}")
+            continue
+
+        if not selected or any(u < 1 or u > len(all_units) for u in selected):
+            print(f"{Fore.RED}Enter numbers between 1 and {len(all_units)}.{Style.RESET_ALL}")
+            continue
+
+        return selected
+
+
+def prompt_resource_selection() -> List[str]:
+    """Prompt for resource type numbers, reprompting until the input is valid."""
+    while True:
+        print(
+            f"\n{Fore.CYAN}Enter resource type numbers (e.g., 2,3,6 for Slides, Notes, QB or 'all'): {Style.RESET_ALL}",
+            end="",
+        )
+        resource_input = input().strip().lower()
+
+        if resource_input == "all":
+            return list(RESOURCE_TYPES.keys())
+
+        selected = [x.strip() for x in resource_input.split(",") if x.strip()]
+        if not selected or any(r not in RESOURCE_TYPES for r in selected):
+            print(f"{Fore.RED}Invalid resource id(s). Choose from: {', '.join(RESOURCE_TYPES)}{Style.RESET_ALL}")
+            continue
+
+        return selected
+
+
 def main():
     """Main interactive flow"""
     print(f"\n{Fore.GREEN}{Style.BRIGHT}{'='*80}{Style.RESET_ALL}")
@@ -1748,6 +1793,13 @@ def main():
         # Get raw (unfiltered) course list once; reused for every course downloaded this session
         all_courses = downloader.get_courses()
 
+        def refresh_all_courses():
+            """Refetch enrolled courses and keep all_courses in sync (used by Ctrl+R)."""
+            fresh = downloader._fetch_student_courses()
+            all_courses.clear()
+            all_courses.extend(fresh)
+            return fresh
+
         while True:
             # Filter by semester
             courses = downloader.filter_courses_by_semester(all_courses)
@@ -1758,7 +1810,7 @@ def main():
 
             # Display and select course
             print(f"\n{Fore.CYAN}[3/7] Selecting course...{Style.RESET_ALL}")
-            selected_course = display_courses(courses, fetch_fn=downloader._fetch_student_courses)
+            selected_course = display_courses(courses, fetch_fn=refresh_all_courses)
 
             if not selected_course:
                 print(f"\n{Fore.YELLOW}No course selected. Exiting.{Style.RESET_ALL}")
@@ -1779,17 +1831,7 @@ def main():
                 print(f"  {idx}. {unit['name']}")
 
             # Select units
-            print(
-                f"\n{Fore.CYAN}Enter unit numbers (e.g., 1,2,3 for units 1,2,3 or 'all'): {Style.RESET_ALL}",
-                end="",
-            )
-            unit_input = input().strip().lower()
-
-            if unit_input == "all":
-                selected_units = list(range(1, len(all_units) + 1))
-            else:
-                selected_units = [int(x.strip()) for x in unit_input.split(",")]
-
+            selected_units = prompt_unit_selection(all_units)
             print(f"{Fore.GREEN}✓ Selected units: {', '.join(map(str, selected_units))}{Style.RESET_ALL}")
 
             # Select resource types
@@ -1797,17 +1839,7 @@ def main():
             for res_id, res_name in RESOURCE_TYPES.items():
                 print(f"  {res_id}. {res_name}")
 
-            print(
-                f"\n{Fore.CYAN}Enter resource type numbers (e.g., 2,3,6 for Slides, Notes, QB or 'all'): {Style.RESET_ALL}",
-                end="",
-            )
-            resource_input = input().strip().lower()
-
-            if resource_input == "all":
-                selected_resources = list(RESOURCE_TYPES.keys())
-            else:
-                selected_resources = [x.strip() for x in resource_input.split(",")]
-
+            selected_resources = prompt_resource_selection()
             resource_names = [RESOURCE_TYPES[r] for r in selected_resources]
             print(f"{Fore.GREEN}✓ Selected resources: {', '.join(resource_names)}{Style.RESET_ALL}")
 
